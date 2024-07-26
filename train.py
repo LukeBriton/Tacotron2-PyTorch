@@ -12,7 +12,8 @@ from model.model import Tacotron2, Tacotron2Loss
 from torch.utils.data import DistributedSampler, DataLoader
 np.random.seed(hps.seed)
 torch.manual_seed(hps.seed)
-torch.cuda.manual_seed(hps.seed)
+if hps.is_cuda:
+    torch.cuda.manual_seed(hps.seed)
 
 
 def prepare_dataloaders(fdir, n_gpu):
@@ -20,7 +21,7 @@ def prepare_dataloaders(fdir, n_gpu):
     collate_fn = ljcollate(hps.n_frames_per_step)
     sampler = DistributedSampler(trainset) if n_gpu > 1 else None
     train_loader = DataLoader(trainset, num_workers = hps.n_workers, shuffle = n_gpu == 1,
-                              batch_size = hps.batch_size, pin_memory = hps.pin_mem,
+                              batch_size = hps.batch_size, pin_memory = (hps.pin_mem if hps.is_cuda else False),
                               drop_last = True, collate_fn = collate_fn, sampler = sampler)
     return train_loader
 
@@ -50,19 +51,21 @@ def train(args):
         n_gpu = int(os.environ['WORLD_SIZE'])
         torch.distributed.init_process_group(
             backend = 'nccl', rank = local_rank, world_size = n_gpu)
-    torch.cuda.set_device(local_rank)
-    device = torch.device('cuda:{:d}'.format(local_rank))
+    if hps.is_cuda:
+        torch.cuda.set_device(local_rank)
+    device = torch.device('cuda:{:d}'.format(local_rank) if hps.is_cuda else 'cpu')
 
     # build model
     model = Tacotron2()
     mode(model, True)
+    model = model.to(device)
     if n_gpu > 1:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids = [local_rank])
     optimizer = torch.optim.Adam(model.parameters(), lr = hps.lr,
                                 betas = hps.betas, eps = hps.eps,
                                 weight_decay = hps.weight_decay)
-    criterion = Tacotron2Loss()
+    criterion = Tacotron2Loss().to(device)
     
     # load checkpoint
     iteration = 1
